@@ -174,6 +174,51 @@ For a list of supported meta messages and their attributes, and also
 how to implement new meta messages, see :doc:`../meta_message_types`.
 
 
+Character Encoding
+------------------
+
+Meta messages that carry text (such as ``lyrics``, ``marker``,
+``track_name`` and ``text``) are stored as raw bytes in the MIDI file.
+The character set used to convert these bytes to and from Python
+strings is the ``charset`` argument of ``MidiFile``, which defaults to
+``latin1``::
+
+    mid = MidiFile('song.mid', charset='utf-8')
+
+The charset belongs to the ``MidiFile`` object. Reading or saving a
+file temporarily activates that file's own charset and restores the
+previously active one when it finishes, even if it raises an
+exception. A read or save operation for one file can therefore run in
+the middle of another file's operation without changing how the first
+file's text is encoded::
+
+    from mido.midifiles.meta import get_charset, meta_charset
+
+    utf8_song = MidiFile('japanese.mid', charset='utf-8')
+    latin1_song = MidiFile('latin1.mid', charset='latin1')
+
+    with meta_charset(utf8_song.charset):
+        # Saving or loading another song with a different charset must
+        # not change how this song's text is encoded.
+        latin1_song.save('copy_of_latin1.mid')
+
+        assert get_charset() == 'utf-8'
+
+Because the active charset is kept per thread (and per asyncio task),
+songs with different charsets can also be processed at the same time
+in different threads.
+
+``mido.midifiles.meta.get_charset()`` returns the charset that is
+currently active, and ``encode_string()`` / ``decode_string()`` in the
+same module use it. This is useful when implementing custom meta
+messages.
+
+If a string cannot be encoded with the file's charset, ``save()``
+raises ``UnicodeEncodeError``. Pick a charset that can represent the
+text, for example ``utf-8``, when creating files containing non-latin1
+characters.
+
+
 About the Time Attribute
 ------------------------
 

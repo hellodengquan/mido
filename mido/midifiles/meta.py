@@ -14,6 +14,7 @@ TODO:
      - copy().
      - expose _key_signature_encode/decode?
 """
+import contextvars
 import math
 import struct
 from contextlib import contextmanager
@@ -21,7 +22,26 @@ from numbers import Integral
 
 from ..messages import BaseMessage, check_time
 
+# Character set used when no file is being read or written.
 _charset = 'latin1'
+
+# The charset of the session that is currently reading or writing a
+# file. A context variable is used instead of a plain module global so
+# that nested sessions, threads and asyncio tasks each get their own
+# value. None means "no session is active, use _charset".
+_charset_var = contextvars.ContextVar('mido_charset', default=None)
+
+
+def get_charset():
+    """Return the character set used by the current session.
+
+    Outside of a file read/write session this is the default charset
+    (latin1).
+    """
+    charset = _charset_var.get()
+    if charset is None:
+        return _charset
+    return charset
 
 
 class KeySignatureError(Exception):
@@ -145,20 +165,27 @@ def decode_variable_int(value):
 
 
 def encode_string(string):
-    return list(bytearray(string.encode(_charset)))
+    return list(bytearray(string.encode(get_charset())))
 
 
 def decode_string(data):
-    return bytearray(data).decode(_charset)
+    return bytearray(data).decode(get_charset())
 
 
 @contextmanager
 def meta_charset(tmp_charset):
-    global _charset
-    old = _charset
-    _charset = tmp_charset
-    yield
-    _charset = old
+    """Use ``tmp_charset`` for strings read or written in this context.
+
+    The previous charset is always restored when the context exits,
+    also when an exception is raised. Because the charset is stored in
+    a context variable, nested sessions and sessions running in other
+    threads or asyncio tasks do not interfere with each other.
+    """
+    token = _charset_var.set(tmp_charset)
+    try:
+        yield
+    finally:
+        _charset_var.reset(token)
 
 
 def check_int(value, low, high):

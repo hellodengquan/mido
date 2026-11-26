@@ -4,10 +4,16 @@
 
 import io
 
+import pytest
 from pytest import raises
 
 from mido.messages import Message
-from mido.midifiles.meta import KeySignatureError, MetaMessage
+from mido.midifiles.meta import (
+    KeySignatureError,
+    MetaMessage,
+    encode_string,
+    meta_charset,
+)
 from mido.midifiles.midifiles import MidiFile, MidiTrack
 
 HEADER_ONE_TRACK = """
@@ -194,3 +200,181 @@ def test_midifile_repr():
     for track, track_eval in zip(midifile.tracks, midifile_eval.tracks):
         for m1, m2 in zip(track, track_eval):
             assert m1 == m2
+
+
+def _text_file(charset, text):
+    """Save a one-track file with a lyrics and a marker message."""
+    mid = MidiFile(type=0, charset=charset)
+    mid.tracks.append(MidiTrack([
+        MetaMessage('lyrics', text=text),
+        MetaMessage('marker', text=text),
+        MetaMessage('end_of_track'),
+    ]))
+    file = io.BytesIO()
+    mid.save(file=file)
+    return file.getvalue()
+
+
+def _texts(data, charset):
+    mid = MidiFile(type=0, charset=charset, file=io.BytesIO(data))
+    return (mid.tracks[0][0].text, mid.tracks[0][1].text)
+
+
+def test_charset_is_used_for_read_and_write():
+    latin1_data = _text_file('latin1', 'café')
+    utf8_data = _text_file('utf-8', '日本')
+
+    assert _texts(latin1_data, 'latin1') == ('café', 'café')
+    assert _texts(utf8_data, 'utf-8') == ('日本', '日本')
+
+    # The bytes are written with the file's own charset.
+    assert b'caf\xe9' in latin1_data
+    assert '日本'.encode('utf-8') in utf8_data
+
+
+def test_charset_is_restored_after_load_error():
+    latin1_data = _text_file('latin1', 'café')
+
+    with raises(EOFError):
+        MidiFile(type=0, charset='utf-8', file=io.BytesIO(b''))
+
+    # The failed utf-8 load must not change the charset used for the
+    # next file.
+    mid = MidiFile(type=0, charset='latin1', file=io.BytesIO(latin1_data))
+    assert mid.tracks[0][0].text == 'café'
+
+    file = io.BytesIO()
+    mid.save(file=file)
+    assert b'caf\xe9' in file.getvalue()
+
+
+def test_saving_another_file_inside_a_session_keeps_charset():
+    """Entering another file's read/write flow must not change the
+    charset used for the file being processed."""
+    latin1_mid = MidiFile(type=0, charset='latin1', file=io.BytesIO(
+        _text_file('latin1', 'café')))
+    utf8_mid = MidiFile(type=0, charset='utf-8', file=io.BytesIO(
+        _text_file('utf-8', '日本')))
+    utf8_data = _text_file('utf-8', '日本語')
+
+    with meta_charset('latin1'):
+        # Another song's edit session, which runs and returns on its own.
+        utf8_file = io.BytesIO()
+        utf8_mid.save(file=utf8_file)
+        MidiFile(type=0, charset='utf-8', file=io.BytesIO(utf8_data))
+
+        # The enclosing session still encodes strings as latin1.
+        assert encode_string('café') == list('café'.encode('latin1'))
+
+        latin1_file = io.BytesIO()
+        latin1_mid.save(file=latin1_file)
+
+    assert _texts(utf8_file.getvalue(), 'utf-8') == ('日本', '日本')
+    assert _texts(latin1_file.getvalue(), 'latin1') == ('café', 'café')
+
+
+def test_failed_other_session_keeps_charset_of_the_first_file():
+    latin1_mid = MidiFile(type=0, charset='latin1', file=io.BytesIO(
+        _text_file('latin1', 'café')))
+
+    with meta_charset('latin1'):
+        with raises(EOFError):
+            MidiFile(type=0, charset='utf-8', file=io.BytesIO(b''))
+
+        assert encode_string('café') == list('café'.encode('latin1'))
+
+        latin1_file = io.BytesIO()
+        latin1_mid.save(file=latin1_file)
+
+    assert b'caf\xe9' in latin1_file.getvalue()
+
+
+def test_reopening_a_saved_file_preserves_text():
+    """Independent edit sessions produce the same result as when run
+    separately, and reopening a saved file restores the text."""
+    utf8_mid = MidiFile(type=0, charset='utf-8', file=io.BytesIO(
+        _text_file('utf-8', '日本')))
+    utf8_mid.tracks[0][0].text = '日本語'
+
+    latin1_mid = MidiFile(type=0, charset='latin1', file=io.BytesIO(
+        _text_file('latin1', 'café')))
+    latin1_mid.tracks[0][1].text = 'café olé'
+
+    # Both sessions are kept open and saved one after the other.
+    utf8_file = io.BytesIO()
+    latin1_file = io.BytesIO()
+    latin1_mid.save(file=latin1_file)
+    utf8_mid.save(file=utf8_file)
+
+    utf8_data = utf8_file.getvalue()
+    latin1_data = latin1_file.getvalue()
+
+    # Reopening the saved files restores the edited text.
+    assert _texts(utf8_data, 'utf-8') == ('日本語', '日本')
+    assert _texts(latin1_data, 'latin1') == ('café', 'café olé')
+
+    # Each file was written with its own charset.
+    assert '日本語'.encode('utf-8') in utf8_data
+    assert 'café olé'.encode('latin1') in latin1_data
+
+
+def test_charset_does_not_leak_between_threads():
+    """A session in one thread must not change another thread's charset."""
+    import threading
+
+    from mido.midifiles import meta
+
+    utf8_data = _text_file('utf-8', '日本')
+    errors = []
+    worker_ready = threading.Event()
+    main_in_session = threading.Event()
+    worker_done = threading.Event()
+
+    real_encode = meta.encode_string
+    in_worker = threading.local()
+
+    def encode_string(string):
+        # Pause the worker right before it encodes the song text, so
+        # that its save overlaps with the main thread's latin1 session.
+        if getattr(in_worker, 'active', False):
+            worker_ready.set()
+            main_in_session.wait(10)
+            result = real_encode(string)
+            worker_done.set()
+            return result
+        return real_encode(string)
+
+    def edit_utf8_song():
+        in_worker.active = True
+        try:
+            mid = MidiFile(type=0, charset='utf-8', file=io.BytesIO(
+                utf8_data))
+            file = io.BytesIO()
+            mid.save(file=file)
+            assert _texts(file.getvalue(), 'utf-8') == ('日本', '日本')
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+        finally:
+            worker_done.set()
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(meta, 'encode_string', encode_string)
+
+        thread = threading.Thread(target=edit_utf8_song)
+        thread.start()
+        try:
+            assert worker_ready.wait(10)
+            # The worker is inside its utf-8 save. While it waits here,
+            # this thread enters its own latin1 session.
+            with meta_charset('latin1'):
+                main_in_session.set()
+                assert worker_done.wait(10)
+
+                # The worker encoded its text as utf-8, and our session
+                # still encodes as latin1.
+                assert encode_string('café') == list('café'.encode('latin1'))
+        finally:
+            main_in_session.set()
+            thread.join(10)
+
+    assert not errors

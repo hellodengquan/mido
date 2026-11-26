@@ -314,11 +314,18 @@ files.
 
 Some additional functions are available::
 
+    from mido.midifiles.meta import decode_string, encode_string
+    from mido.midifiles.meta import get_charset, meta_charset
+
     encode_string(unicode_string)
     decode_string(byte_list)
 
 These convert between a Unicode string and a list of bytes using the
-current character set in the file.
+character set of the file that is currently being read or written.
+Use ``get_charset()`` to find out which charset is active, and
+``meta_charset(charset)`` as a context manager to temporarily select
+one. The charset is tracked per thread (and per asyncio task), and the
+previous value is restored when the context exits.
 
 If your message contains only one string with the attribute name
 ``text`` or ``name``, you can subclass from one of the existing

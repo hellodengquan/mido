@@ -9,6 +9,10 @@ from mido.midifiles.meta import (
     MetaMessage,
     MetaSpec_key_signature,
     UnknownMetaMessage,
+    decode_string,
+    encode_string,
+    get_charset,
+    meta_charset,
 )
 
 
@@ -95,3 +99,72 @@ def test_meta_from_bytes_text():
     msg = MetaMessage.from_bytes(test_bytes)
     assert msg.type == 'text'
     assert msg.text == 'TEST'
+
+
+class TestMetaCharset:
+    def test_default_charset_is_latin1(self):
+        assert get_charset() == 'latin1'
+
+    def test_encode_decode_use_active_charset(self):
+        with meta_charset('utf-8'):
+            assert encode_string('日本') == list('日本'.encode('utf-8'))
+            assert decode_string('日本'.encode('utf-8')) == '日本'
+
+        assert encode_string('café') == list('café'.encode('latin1'))
+
+    def test_charset_restored_after_exception(self):
+        with pytest.raises(RuntimeError):
+            with meta_charset('utf-8'):
+                assert get_charset() == 'utf-8'
+                raise RuntimeError
+
+        assert get_charset() == 'latin1'
+        assert encode_string('café') == list('café'.encode('latin1'))
+
+    def test_nested_sessions_restore_each_other(self):
+        with meta_charset('latin1'):
+            with meta_charset('utf-8'):
+                assert get_charset() == 'utf-8'
+            assert get_charset() == 'latin1'
+            assert encode_string('café') == list('café'.encode('latin1'))
+
+        assert get_charset() == 'latin1'
+
+    def test_nested_session_exception_does_not_leak(self):
+        with meta_charset('latin1'):
+            with pytest.raises(RuntimeError):
+                with meta_charset('utf-8'):
+                    raise RuntimeError
+            assert get_charset() == 'latin1'
+
+        assert get_charset() == 'latin1'
+
+    def test_threads_use_their_own_charset(self):
+        """An active session in another thread must not change this
+        thread's charset."""
+        import threading
+
+        main_session_active = threading.Event()
+        other_checked = threading.Event()
+        result = {}
+
+        def other_thread():
+            with meta_charset('utf-8'):
+                assert main_session_active.wait(5)
+                # The main thread now has its own latin1 session
+                # active. Ours must still be utf-8.
+                result['other'] = (get_charset(), encode_string('日本'))
+                other_checked.set()
+
+        thread = threading.Thread(target=other_thread)
+        thread.start()
+        try:
+            with meta_charset('latin1'):
+                main_session_active.set()
+                assert other_checked.wait(5)
+                assert get_charset() == 'latin1'
+        finally:
+            thread.join(5)
+
+        assert result['other'] == ('utf-8', list('日本'.encode('utf-8')))
+        assert get_charset() == 'latin1'
