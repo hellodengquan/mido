@@ -207,6 +207,32 @@ resolution is stored as ``ticks_per_beat`` in MidiFile objects.
 The meaning of this ``ticks_per_beat`` in terms of absolute timing depends on
 the tempo and time signature of the file.
 
+Timecode (SMPTE) divisions
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+MIDI files made for film and video can instead use a SMPTE time division. The
+header division word is then negative: its high byte is one of the negative
+frame formats ``-24``, ``-25``, ``-29`` or ``-30`` (where ``-29`` means 30
+drop-frame, i.e. 29.97 fps) and its low byte is the number of ticks per frame.
+
+When such a file is loaded, ``ticks_per_beat`` is ``None`` and the decoded
+values are available as ``smpte_fps`` (the integer code 24, 25, 29 or 30) and
+``smpte_ticks_per_frame``. Use ``frames_per_second`` for the precise rate
+(``29.97`` for code 29). The raw signed division word is available as
+``division``.
+
+Delta ticks in a timecode division measure wall-clock time directly::
+
+    seconds_per_tick = 1 / (smpte_fps * smpte_ticks_per_frame)
+
+Playback (``for msg in mid``, :py:attr:`MidiFile.length <mido.MidiFile.length>`
+and :py:meth:`MidiFile.play <mido.MidiFile.play>`) therefore follows the
+declared frame rate and ignores the tempo map. ``set_tempo`` meta messages are
+still yielded and stay readable and editable; they are simply not used for
+timing. Saving the file reconstructs the same division word, so the result
+stays synchronized to picture. Metrical (positive) divisions are unaffected
+and keep following their tempo map.
+
 
 MIDI Tempo vs. BPM
 ^^^^^^^^^^^^^^^^^^

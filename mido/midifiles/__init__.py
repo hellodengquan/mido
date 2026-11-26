@@ -5,7 +5,14 @@
 from .meta import KeySignatureError, MetaMessage, UnknownMetaMessage
 from .midifiles import MidiFile
 from .tracks import MidiTrack, merge_tracks
-from .units import bpm2tempo, second2tick, tempo2bpm, tick2second
+from .units import (
+    bpm2tempo,
+    second2smpte_tick,
+    second2tick,
+    smpte_tick2second,
+    tempo2bpm,
+    tick2second,
+)
 
 __all__ = [
     "KeySignatureError",
@@ -15,7 +22,9 @@ __all__ = [
     "UnknownMetaMessage",
     "bpm2tempo",
     "merge_tracks",
+    "second2smpte_tick",
     "second2tick",
+    "smpte_tick2second",
     "tempo2bpm",
     "tick2second",
 ]

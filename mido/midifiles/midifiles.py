@@ -27,7 +27,7 @@ from numbers import Integral
 from ..messages import SPEC_BY_STATUS, Message
 from .meta import MetaMessage, build_meta_message, encode_variable_int, meta_charset
 from .tracks import MidiTrack, fix_end_of_track, merge_tracks
-from .units import tick2second
+from .units import SMPTE_FRAMES_PER_SECOND, tick2second
 
 # The default tempo is 120 BPM.
 # (500000 microseconds per beat (quarter note).)
@@ -36,6 +36,45 @@ DEFAULT_TICKS_PER_BEAT = 480
 
 # Maximum message length to attempt to read.
 MAX_MESSAGE_LENGTH = 1000000
+
+# SMPTE time division frame-rate codes.
+#
+# When the high bit of the 16 bit MIDI file division word is set, the
+# division is a SMPTE time division: the high byte is the *negative*
+# frame format (one of -24, -25, -29 or -30) and the low byte is the
+# number of ticks per frame. Code 29 stands for 30 drop-frame, i.e.
+# 29.97 frames per second of wall-clock time.
+SMPTE_FRAME_RATE_CODES = (24, 25, 29, 30)
+# Backwards-compatible alias used by some callers.
+SMPTE_FRAME_RATES = SMPTE_FRAME_RATE_CODES
+
+
+def decode_smpte_division(division):
+    """Decode a SMPTE time division word.
+
+    `division` is the signed 16 bit division value from the file header
+    (``ticks_per_beat``). Returns a ``(frame_rate_code, ticks_per_frame)``
+    tuple for a negative (SMPTE time division) value, or ``None`` for a
+    positive metrical (ticks per beat) division.
+
+    The frame rate code is the positive form of the negative high byte:
+    24, 25, 29 or 30, where 29 means 29.97 drop-frame.
+    """
+    if not isinstance(division, Integral) or division >= 0:
+        return None
+
+    frame_rate_code = -(division >> 8)
+    ticks_per_frame = division & 0xFF
+    return frame_rate_code, ticks_per_frame
+
+
+class InvalidTimeDivisionError(OSError, ValueError):
+    """The header time division is malformed or unsupported.
+
+    It is both an :class:`OSError` (the file could not be parsed) and a
+    :class:`ValueError` (the division value is invalid) so callers can
+    catch whichever they already handle.
+    """
 
 
 def print_byte(byte, pos=0):
@@ -294,15 +333,40 @@ class MidiFile:
                  charset='latin1',
                  debug=False,
                  clip=False,
-                 tracks=None
+                 tracks=None,
+                 smpte_fps=None,
+                 smpte_ticks_per_frame=None
                  ):
 
         self.filename = filename
         self.type = type
-        self.ticks_per_beat = ticks_per_beat
         self.charset = charset
         self.debug = debug
         self.clip = clip
+
+        # Raw metrical resolution. This is None for a SMPTE division; the
+        # decoded frame state lives in ``_smpte_fps`` /
+        # ``_smpte_ticks_per_frame`` and is exposed through the
+        # ``smpte_fps`` / ``smpte_ticks_per_frame`` properties.
+        self.ticks_per_beat = ticks_per_beat
+        self._smpte_fps = smpte_fps
+        self._smpte_ticks_per_frame = smpte_ticks_per_frame
+
+        if smpte_fps is not None or smpte_ticks_per_frame is not None:
+            if smpte_fps is None or smpte_ticks_per_frame is None:
+                raise ValueError(
+                    'smpte_fps and smpte_ticks_per_frame must be given '
+                    'together')
+            # Explicit SMPTE construction takes precedence.
+            self.ticks_per_beat = None
+        else:
+            # A negative ticks_per_beat is the raw SMPTE division word;
+            # decode it up front so the public attributes are populated.
+            smpte = decode_smpte_division(ticks_per_beat)
+            if smpte is not None:
+                (self._smpte_fps,
+                 self._smpte_ticks_per_frame) = smpte
+                self.ticks_per_beat = None
 
         self.tracks = []
         self._merged_track = None
@@ -319,6 +383,53 @@ class MidiFile:
             with open(filename, 'rb') as file:
                 self._load(file)
 
+        # A zero division word is invalid in a MIDI file and would divide
+        # by zero while computing playback times.
+        if self.ticks_per_beat == 0 and not self.is_smpte:
+            raise ValueError('ticks_per_beat must be positive (got 0)')
+
+    def _smpte_parts(self):
+        """Resolve ``(frame_rate_code, ticks_per_frame)``.
+
+        Uses explicitly assigned SMPTE attributes when present and otherwise
+        decodes a raw negative ``ticks_per_beat`` division word, so direct
+        assignment of the raw word also works.
+        """
+        code = None
+        ticks_per_frame = None
+
+        raw = decode_smpte_division(getattr(self, 'ticks_per_beat', None))
+        if raw is not None:
+            code, ticks_per_frame = raw
+
+        if getattr(self, '_smpte_fps', None) is not None:
+            code = self._smpte_fps
+        if getattr(self, '_smpte_ticks_per_frame', None) is not None:
+            ticks_per_frame = self._smpte_ticks_per_frame
+
+        return code, ticks_per_frame
+
+    @property
+    def smpte_fps(self):
+        """SMPTE frame-rate code (24, 25, 29 or 30), else None.
+
+        Code 29 means 30 drop-frame (29.97 fps). Settable.
+        """
+        return self._smpte_parts()[0]
+
+    @smpte_fps.setter
+    def smpte_fps(self, value):
+        self._smpte_fps = value
+
+    @property
+    def smpte_ticks_per_frame(self):
+        """Ticks per frame from a SMPTE division, else None. Settable."""
+        return self._smpte_parts()[1]
+
+    @smpte_ticks_per_frame.setter
+    def smpte_ticks_per_frame(self, value):
+        self._smpte_ticks_per_frame = value
+
     @property
     def merged_track(self):
         # The tracks of type 2 files are not in sync, so they can
@@ -333,6 +444,121 @@ class MidiFile:
     @merged_track.deleter
     def merged_track(self):
         self._merged_track = None
+
+    @property
+    def is_smpte(self):
+        """True if the file uses a SMPTE timecode division.
+
+        Such files store a negative division word in the header: the high
+        byte declares the frame rate and the low byte the ticks per frame.
+        Their playback time is wall-clock time derived from the frame rate,
+        independent of any tempo meta messages.
+        """
+        return self.smpte_fps is not None
+
+    # Descriptive alias.
+    is_timecode = is_smpte
+
+    @property
+    def fps(self):
+        """Frame-rate code used for tick-to-second conversion.
+
+        Returns the positive form of the division's negative frame byte:
+        24, 25, 29 or 30 (None for a metrical division). Code 29 denotes
+        30 drop-frame; use :attr:`frames_per_second` for the precise
+        29.97 fps wall-clock rate.
+        """
+        return self.smpte_fps
+
+    # The encoded code is also exposed under this name.
+    fps_code = fps
+    smpte_frame_rate_code = fps
+
+    @property
+    def ticks_per_frame(self):
+        """Ticks per frame from a SMPTE division, else None.
+
+        Setter updates :attr:`smpte_ticks_per_frame`.
+        """
+        return self.smpte_ticks_per_frame
+
+    @ticks_per_frame.setter
+    def ticks_per_frame(self, value):
+        self.smpte_ticks_per_frame = value
+
+    @property
+    def frames_per_second(self):
+        """Precise playback frame rate in frames per second.
+
+        This is 24, 25, 29.97 (for code 29, 30 drop-frame) or 30, and
+        None for a metrical (ticks per beat) division.
+        """
+        code = self.smpte_fps
+        if code is None:
+            return None
+        return SMPTE_FRAMES_PER_SECOND.get(code, float(code))
+
+    # mido's meta-message vocabulary calls this ``frame_rate``.
+    frame_rate = frames_per_second
+
+    @property
+    def seconds_per_smpte_tick(self):
+        """Seconds elapsed for each delta tick in a SMPTE division file."""
+        ticks_per_frame = self.smpte_ticks_per_frame
+        if ticks_per_frame is None:
+            return None
+        if ticks_per_frame < 1:
+            raise ValueError(
+                'invalid SMPTE time division: ticks per frame must be >= 1,'
+                f' got {ticks_per_frame}')
+        if not self.smpte_fps:
+            raise ValueError(
+                'invalid SMPTE time division: missing frame rate code')
+        # The division counts ticks per nominal frame, so the delta time is
+        # tick / (frame-rate-code * ticks-per-frame). For the 24, 25 and 30
+        # fps standards this is the exact wall-clock rate; code 29 (30
+        # drop-frame) is handled with the same integer convention used by
+        # the division word.
+        return 1.0 / (self.smpte_fps * ticks_per_frame)
+
+    @property
+    def ticks_per_second(self):
+        """Number of delta ticks making up one second for SMPTE division.
+
+        Equals ``smpte_fps * smpte_ticks_per_frame``; None for a metrical
+        (ticks per beat) division.
+        """
+        if self.smpte_fps is None or self.smpte_ticks_per_frame is None:
+            return None
+        return self.smpte_fps * self.smpte_ticks_per_frame
+
+    @property
+    def division(self):
+        """Raw 16 bit division word stored in (or written to) the header.
+
+        It is positive for ticks-per-beat (metrical) files and negative for
+        SMPTE timecode files. For SMPTE files ``ticks_per_beat`` is None and
+        the raw word is reconstructed from ``smpte_fps`` and
+        ``smpte_ticks_per_frame``.
+        """
+        if self.smpte_fps is not None:
+            division = (((-self.smpte_fps) & 0xFF) << 8
+                        | (self.smpte_ticks_per_frame & 0xFF))
+            # struct packs a signed short, so convert to a negative int.
+            return division - 0x10000
+
+        return self.ticks_per_beat
+
+    @division.setter
+    def division(self, value):
+        smpte = decode_smpte_division(value)
+        if smpte is None:
+            self.smpte_fps = None
+            self.smpte_ticks_per_frame = None
+            self.ticks_per_beat = value
+        else:
+            self.smpte_fps, self.smpte_ticks_per_frame = smpte
+            self.ticks_per_beat = None
 
     def add_track(self, name=None):
         """Add a new track to the file.
@@ -357,7 +583,32 @@ class MidiFile:
 
             (self.type,
              num_tracks,
-             self.ticks_per_beat) = read_file_header(infile)
+             division) = read_file_header(infile)
+
+            smpte = decode_smpte_division(division)
+            if smpte is not None:
+                frame_rate_code, ticks_per_frame = smpte
+
+                if frame_rate_code not in SMPTE_FRAME_RATE_CODES:
+                    raise InvalidTimeDivisionError(
+                        'invalid SMPTE frame rate '
+                        f'{frame_rate_code} in time division word '
+                        f'{division} (must be one of '
+                        f'{", ".join(map(str, SMPTE_FRAME_RATE_CODES))})')
+
+                if ticks_per_frame < 1:
+                    raise InvalidTimeDivisionError(
+                        'invalid SMPTE time division: ticks per frame '
+                        f'must be >= 1, got {ticks_per_frame}')
+
+                self.smpte_fps = frame_rate_code
+                self.smpte_ticks_per_frame = ticks_per_frame
+                # ticks_per_beat is meaningless for a SMPTE division.
+                self.ticks_per_beat = None
+            else:
+                self.smpte_fps = None
+                self.smpte_ticks_per_frame = None
+                self.ticks_per_beat = division
 
             if self.debug:
                 _dbg('-> type={}, tracks={}, ticks_per_beat={}'.format(
@@ -387,6 +638,25 @@ class MidiFile:
         return sum(msg.time for msg in self)
 
     def __iter__(self):
+        if self.is_smpte:
+            # SMPTE time division: delta ticks subdivide frames of a fixed
+            # frame rate, so they measure wall-clock time directly. The
+            # tempo map is intentionally not applied; set_tempo messages are
+            # still yielded (with their tempo attribute intact) so editors
+            # can read and write the musical tempo.
+            seconds_per_tick = self.seconds_per_smpte_tick
+
+            for msg in self.merged_track:
+                # Convert message time from absolute time
+                # in ticks to relative time in seconds.
+                if msg.time > 0:
+                    delta = msg.time * seconds_per_tick
+                else:
+                    delta = 0
+
+                yield msg.copy(skip_checks=True, time=delta)
+            return
+
         tempo = DEFAULT_TEMPO
         for msg in self.merged_track:
             # Convert message time from absolute time
@@ -463,7 +733,7 @@ class MidiFile:
         with meta_charset(self.charset):
             header = struct.pack('>hhh', self.type,
                                  len(self.tracks),
-                                 self.ticks_per_beat)
+                                 self.division)
 
             write_chunk(outfile, b'MThd', header)
 
@@ -493,10 +763,12 @@ class MidiFile:
         else:
             tracks_str = ''
 
+        # Show the raw division word so the representation round-trips
+        # through the constructor for both metrical and SMPTE divisions.
         return '{}(type={}, ticks_per_beat={}{})'.format(
             self.__class__.__name__,
             self.type,
-            self.ticks_per_beat,
+            self.division,
             tracks_str,
         )
 
