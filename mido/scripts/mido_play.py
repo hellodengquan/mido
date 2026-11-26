@@ -41,6 +41,13 @@ def parse_args():
         default=False,
         help='print nothing')
 
+    arg('-t', '--track',
+        metavar='INDEX',
+        type=int,
+        default=None,
+        help='play only song track INDEX of a type 2 '
+             '(asynchronous) file, using that song\'s own tempo map')
+
     arg('files',
         metavar='FILE',
         nargs='+',
@@ -49,19 +56,22 @@ def parse_args():
     return parser.parse_args()
 
 
-def play_file(output, filename, print_messages):
+def play_file(output, filename, print_messages, track=None):
     midi_file = MidiFile(filename)
 
     print(f'Playing {midi_file.filename}.')
-    length = midi_file.length
+    if track is not None:
+        length = midi_file.track_length(track)
+    else:
+        length = midi_file.length
     print('Song length: {} minutes, {} seconds.'.format(
         int(length / 60),
         int(length % 60)))
     print('Tracks:')
-    for i, track in enumerate(midi_file.tracks):
-        print(f'  {i:2d}: {track.name.strip()!r}')
+    for i, file_track in enumerate(midi_file.tracks):
+        print(f'  {i:2d}: {file_track.name.strip()!r}')
 
-    for message in midi_file.play(meta_messages=True):
+    for message in midi_file.play(meta_messages=True, track=track):
         if print_messages:
             sys.stdout.write(repr(message) + '\n')
             sys.stdout.flush()
@@ -89,7 +99,8 @@ def main():
             output.reset()
             try:
                 for filename in args.files:
-                    play_file(output, filename, args.print_messages)
+                    play_file(output, filename, args.print_messages,
+                              track=args.track)
             finally:
                 print()
                 output.reset()

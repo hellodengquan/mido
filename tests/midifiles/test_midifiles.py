@@ -194,3 +194,124 @@ def test_midifile_repr():
     for track, track_eval in zip(midifile.tracks, midifile_eval.tracks):
         for m1, m2 in zip(track, track_eval):
             assert m1 == m2
+
+
+def make_type2_songs():
+    # Two independent songs (type 2). The second song starts with a rest
+    # and changes tempo before its first note, so it must be timed with
+    # its own tempo map from its own time zero.
+    song_a = MidiTrack([
+        MetaMessage('track_name', name='Song A'),
+        Message('note_on', note=60, time=480),
+        Message('note_off', note=60, time=480),
+        MetaMessage('end_of_track', time=960),
+    ])
+    song_b = MidiTrack([
+        MetaMessage('track_name', name='Song B'),
+        # A rest of one beat at the default tempo (0.5 s).
+        MetaMessage('set_tempo', tempo=1000000, time=480),
+        # One beat at 60 BPM (1.0 s).
+        Message('note_on', note=72, time=480),
+        Message('note_off', note=72, time=480),
+        MetaMessage('end_of_track', time=480),
+    ])
+    return MidiFile(type=2, ticks_per_beat=480,
+                    tracks=[song_a, song_b])
+
+
+def test_type2_play_selected_track_uses_its_own_tempo_map():
+    mid = make_type2_songs()
+
+    messages = list(mid.play(track=1, meta_messages=True))
+    assert [msg.type for msg in messages] == [
+        'track_name', 'set_tempo', 'note_on', 'note_off', 'end_of_track']
+
+    # The first beat is a rest at the default tempo, then the track's
+    # own 60 BPM takes over. The song starts at its own time zero.
+    assert messages[0].time == 0
+    assert messages[1].time == 0.5
+    assert messages[2].time == 1.0
+    assert messages[3].time == 1.0
+    assert messages[4].time == 1.0
+
+
+def test_type2_track_length_includes_whole_arrangement():
+    mid = make_type2_songs()
+    assert mid.track_length(0) == 480 / 960 + 480 / 960 + 960 / 960
+    assert mid.track_length(1) == 0.5 + 1.0 + 1.0 + 1.0
+
+
+def test_type2_play_selected_track_is_a_single_song():
+    mid = make_type2_songs()
+    messages = list(mid.play(track=0))
+    assert [msg.note for msg in messages] == [60, 60]
+    messages = list(mid.play(track=1))
+    assert [msg.note for msg in messages] == [72, 72]
+
+
+def test_type2_selection_does_not_persist():
+    mid = make_type2_songs()
+    list(mid.play(track=1))
+
+    # The file is untouched: both songs are still there and the
+    # original behaviour for an unselected type 2 file is intact.
+    assert len(mid.tracks) == 2
+    with raises(TypeError):
+        list(mid.play())
+    with raises(TypeError):
+        list(mid)
+    with raises(ValueError):
+        mid.length
+
+
+def test_type2_track_index_out_of_range():
+    mid = make_type2_songs()
+    with raises(IndexError):
+        list(mid.play(track=2))
+    with raises(IndexError):
+        mid.track_length(2)
+
+
+def test_type2_track_index_must_be_an_integer():
+    mid = make_type2_songs()
+    with raises(TypeError):
+        list(mid.play(track='1'))
+
+
+def test_track_selection_rejected_for_synchronous_files():
+    mid = MidiFile(type=1, ticks_per_beat=480, tracks=[MidiTrack([
+        Message('note_on', note=64, time=0),
+    ])])
+    with raises(ValueError):
+        list(mid.play(track=0))
+    with raises(ValueError):
+        mid.iter_track(0)
+    with raises(ValueError):
+        mid.track_length(0)
+
+    # Synchronous files keep playing as an ensemble.
+    assert [msg.note for msg in mid.play()] == [64]
+    assert [msg.note for msg in mid if not msg.is_meta] == [64]
+
+
+def test_type2_alternating_songs_keep_their_own_tempo():
+    # Interleaving the iterators of two songs must not leak one song's
+    # tempo map or position into the other.
+    mid = make_type2_songs()
+    song_a = mid.iter_track(0)
+    song_b = mid.iter_track(1)
+
+    first_a = next(song_a)
+    first_b = next(song_b)
+    assert first_a.time == 0
+    assert first_b.time == 0
+
+    tempo_a = next(song_a)  # Song A has no tempo change before its notes.
+    tempo_b = next(song_b)  # Song B switches to 60 BPM here.
+    assert tempo_a.time == 0.5
+    assert tempo_b.time == 0.5
+
+    # Song B now plays at its own 60 BPM, not Song A's default tempo.
+    assert next(song_b).time == 1.0
+    # Song A keeps its own default tempo.
+    assert next(song_a).time == 0.5

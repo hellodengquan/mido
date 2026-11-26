@@ -379,6 +379,11 @@ class MidiFile:
 
         This will be computed by going through every message in every
         track and adding up delta times.
+
+        For type 2 (asynchronous) files this raises ValueError, since
+        the tracks are independent songs that start on their own. Use
+        :meth:`track_length` to query the length of a single song
+        track instead.
         """
         if self.type == 2:
             raise ValueError('impossible to compute length'
@@ -386,11 +391,36 @@ class MidiFile:
 
         return sum(msg.time for msg in self)
 
-    def __iter__(self):
+    def _get_song_track(self, track):
+        """Return the song track selected by index `track`.
+
+        Selecting a song only makes sense for type 2 files, where every
+        track is an independent song. Type 0 and 1 files are a single
+        synchronous score and keep playing as an ensemble.
+        """
+        if self.type != 2:
+            raise ValueError(
+                'track selection is only supported for type 2 '
+                '(asynchronous) files, whose tracks are independent songs')
+
+        if isinstance(track, bool) or not isinstance(track, Integral):
+            raise TypeError('track must be an integer index')
+
+        try:
+            return self.tracks[track]
+        except IndexError:
+            raise IndexError(
+                f'track index {track} out of range for a file with '
+                f'{len(self.tracks)} tracks') from None
+
+    def _iter_seconds(self, messages):
+        # Convert delta times in ticks to delta times in seconds using
+        # the tempo map found while iterating. `messages` is either the
+        # merged track or one independent song track of a type 2 file.
+        # Each call starts from the default tempo at time zero, so the
+        # tempo map of one song can never leak into another.
         tempo = DEFAULT_TEMPO
-        for msg in self.merged_track:
-            # Convert message time from absolute time
-            # in ticks to relative time in seconds.
+        for msg in messages:
             if msg.time > 0:
                 delta = tick2second(msg.time, self.ticks_per_beat, tempo)
             else:
@@ -401,7 +431,38 @@ class MidiFile:
             if msg.type == 'set_tempo':
                 tempo = msg.tempo
 
-    def play(self, meta_messages=False, now=time.time):
+    def iter_track(self, track):
+        """Iterate over the messages of one song track.
+
+        Only available for type 2 (asynchronous) files, where each track
+        is an independent song. The messages are yielded in playback
+        order starting at the track's own time zero, with the time
+        attribute set to the number of seconds since the previous
+        message. The tempo map of the selected track alone is used, so
+        the song plays at its own speed independently of the other
+        tracks.
+
+        This does not change the file: the selection only applies to the
+        returned iterator. Iterating over the `MidiFile` itself is still
+        not supported for type 2 files.
+        """
+        return self._iter_seconds(self._get_song_track(track))
+
+    def track_length(self, track):
+        """Playback time in seconds of one song track.
+
+        Only available for type 2 (asynchronous) files. The duration is
+        computed with the tempo map of the selected track and includes
+        the complete arrangement of that song, i.e. the delta time of
+        its last message (normally end_of_track), so trailing rests
+        count as well.
+        """
+        return sum(msg.time for msg in self.iter_track(track))
+
+    def __iter__(self):
+        yield from self._iter_seconds(self.merged_track)
+
+    def play(self, meta_messages=False, now=time.time, track=None):
         """Play back all tracks.
 
         The generator will sleep between each message by
@@ -419,11 +480,27 @@ class MidiFile:
         MIDI events. To use a different clock (e.g. to synchronize to
         an audio stream), pass now=time_fn where time_fn is a zero
         argument function that yields the current time in seconds.
+
+        For a type 2 (asynchronous) file, whose tracks are independent
+        songs, pass track=N to play song track N on its own. The song
+        starts at its own time zero and follows its own tempo map. The
+        selection applies to this call only: the file keeps all tracks
+        and later calls without track= behave as before. Without
+        track= a type 2 file still raises TypeError, since its tracks
+        cannot be played back together.
         """
+        if track is not None:
+            messages = self.iter_track(track)
+        else:
+            # Without a selection a type 2 file keeps the original
+            # behaviour: iterating raises TypeError, since its tracks
+            # are not in sync and can not be played back as an ensemble.
+            messages = self
+
         start_time = now()
         input_time = 0.0
 
-        for msg in self:
+        for msg in messages:
             input_time += msg.time
 
             playback_time = now() - start_time

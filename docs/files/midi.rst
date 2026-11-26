@@ -143,7 +143,39 @@ You can get the total playback time in seconds by accessing the
 
 This is only supported for type 0 and 1 files. Accessing ``length`` on
 a type 2 file will raise ``ValueError``, since it is impossible to
-compute the playback time of an asynchronous file.
+compute the playback time of an asynchronous file. To get the length of
+one song in a type 2 file, see `Playing a Single Song`_ below.
+
+
+Playing a Single Song
+---------------------
+
+In a type 2 file each track is an independent song that starts at its own
+time zero and may have its own tempo map. To play one of these songs on
+its own, pass the track index to ``play()``::
+
+   for msg in MidiFile('hits.mid').play(track=1):
+       port.send(msg)
+
+The song starts at its own time zero and follows only its own
+``set_tempo`` messages, including any tempo change that comes after an
+initial rest. The selection applies to that call only: it does not
+reorder, merge or remove any track, and a later ``play()`` without
+``track`` behaves exactly as before. (For a type 2 file that still means
+``TypeError``, because the asynchronous tracks cannot be played back as
+an ensemble.)
+
+To get the duration of a single song use ``track_length()``::
+
+   mid.track_length(1)
+
+The result is the playback time in seconds of that song, computed with
+its own tempo map and including the complete arrangement, i.e. the delta
+time up to the end of its track, so trailing rests count as well.
+
+Both ``track`` and ``iter_track()`` require a type 2 file: for type 0 and
+1 files, whose tracks are one synchronous score, they raise
+``ValueError`` and the file keeps playing as an ensemble.
 
 
 Meta Messages
