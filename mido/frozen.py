@@ -5,7 +5,7 @@
 from typing import Optional
 
 from .messages import BaseMessage, Message
-from .midifiles import MetaMessage, UnknownMetaMessage
+from .midifiles import MetaMessage, SysexEvent, UnknownMetaMessage
 
 
 class Frozen:
@@ -27,6 +27,10 @@ class FrozenMetaMessage(Frozen, MetaMessage):
 class FrozenUnknownMetaMessage(Frozen, UnknownMetaMessage):
     def __repr__(self):
         return 'Frozen' + UnknownMetaMessage.__repr__(self)
+
+
+class FrozenSysexEvent(Frozen, SysexEvent):
+    pass
 
 
 def is_frozen(msg: Optional[BaseMessage]):
@@ -57,6 +61,8 @@ def freeze_message(msg: Optional[BaseMessage]):
         class_ = FrozenUnknownMetaMessage
     elif isinstance(msg, MetaMessage):
         class_ = FrozenMetaMessage
+    elif isinstance(msg, SysexEvent):
+        class_ = FrozenSysexEvent
     elif msg is None:
         return None
     else:
@@ -85,6 +91,8 @@ def thaw_message(msg: Optional[BaseMessage]):
         class_ = UnknownMetaMessage
     elif isinstance(msg, FrozenMetaMessage):
         class_ = MetaMessage
+    elif isinstance(msg, FrozenSysexEvent):
+        class_ = SysexEvent
     else:
         raise ValueError('first argument must be a message or None')
 

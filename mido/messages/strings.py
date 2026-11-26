@@ -7,6 +7,18 @@ from .specs import SPEC_BY_TYPE, make_msgdict
 
 def msg2str(msg, include_time=True):
     type_ = msg['type']
+
+    if type_ == 'sysex_event':
+        # A file event, not a MIDI message: the status is a number
+        # and the data may contain values above 127.
+        words = [type_,
+                 'status=0x{:02x}'.format(msg['status']),
+                 'data=({})'.format(','.join(
+                     str(byte) for byte in msg['data']))]
+        if include_time:
+            words.append('time={}'.format(msg['time']))
+        return str.join(' ', words)
+
     spec = SPEC_BY_TYPE[type_]
 
     words = [type_]

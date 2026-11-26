@@ -16,6 +16,19 @@ This project uses `Semantic Versioning <https://semver.org>`_.
 Release History
 ---------------
 
+Development
+^^^^^^^^^^^
+
+* New ``SysexEvent`` file event keeps segmented SysEx data intact.
+  Unterminated ``F0`` packets, ``F7`` continuations and ``F7`` escapes
+  are read and written with their original status byte, payload and
+  delta time, so a split SysEx dump reaches the device at the same
+  moments with the same bytes. Complete ``F0 ... F7`` packets still
+  read as ``Message('sysex')``.
+
+* Bugfix Midifile: a SysEx event no longer leaves a SysEx status byte
+  as the running status, which made the following data byte unreadable.
+
 1.3.3 (2024-10-25)
 ^^^^^^^^^^^^^^^^^^
 

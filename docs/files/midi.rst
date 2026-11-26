@@ -174,6 +174,75 @@ For a list of supported meta messages and their attributes, and also
 how to implement new meta messages, see :doc:`../meta_message_types`.
 
 
+Segmented SysEx Events
+----------------------
+
+A long SysEx message, such as a device patch or tone dump, can be
+spread over several events in a track: an ``F0`` packet that starts
+the message, followed by one or more ``F7`` continuation events. Each
+event has its own delta time, so the device receives the parts at
+different moments. A track can also contain ``F7`` *escape* events that
+are not part of a SysEx message at all, for example an escaped system
+realtime byte.
+
+``Message('sysex')`` can only describe a complete message: its ``data``
+holds 7-bit payload bytes and does not include the ``F0``/``F7``
+framing. Mido therefore represents everything else with
+:class:`mido.SysexEvent`, a file event that keeps the status byte, the
+raw payload and the delta time exactly as stored in the file::
+
+    from mido import MidiFile
+
+    mid = MidiFile('dump.mid')
+    for msg in mid.tracks[0]:
+        print(msg)
+
+A track holding one SysEx message split over three packets prints
+lines like these::
+
+    sysex_event status=0xf0 data=(67,18,0) time=0
+    sysex_event status=0xf7 data=(67,18,0,67,18,0) time=200
+    sysex_event status=0xf7 data=(67,18,0,247) time=100
+
+The status is ``0xf0`` for an unterminated start packet and ``0xf7``
+for a continuation or escape event. ``data`` holds the event payload
+byte for byte and may contain values above 127. Writing the track back
+reproduces the original events and their times, so the device receives
+the same bytes at the same moments::
+
+    mid.save('dump_copy.mid')
+
+How a file event is classified:
+
+* A complete ``F0 ... F7`` packet is read as ``Message('sysex')``. The
+  ``F7`` is dropped from ``data`` and added back when saving.
+* An ``F0`` packet whose payload does not end with ``F7`` is a segment
+  that continues in later events. It is kept as a ``SysexEvent``.
+* Every ``F7`` event is kept as a ``SysexEvent``, whether it continues
+  an earlier ``F0`` packet or is an independent escape.
+* An ``F0`` packet that looks complete but contains a status byte in
+  its payload cannot be expressed as a ``Message`` either, so it is
+  kept as a ``SysexEvent`` too.
+
+The delta times of the surrounding performance events are unaffected:
+a note following the last segment still plays at its original tick.
+
+``SysexEvent`` objects are file events. They cannot be sent on ports,
+and ``MidiFile.play()`` yields them only together with the meta
+messages (``meta_messages=True``). A consumer that talks to a device
+can forward ``event.status`` and ``event.data`` at ``event.time`` to
+reassemble the original message::
+
+    from mido import SysexEvent
+
+    for msg in mid.tracks[0]:
+        if isinstance(msg, SysexEvent):
+            ...  # send msg.status and msg.data as-is
+
+Use ``event.copy()`` to change any attribute, for example
+``event.copy(time=0)``.
+
+
 About the Time Attribute
 ------------------------
 

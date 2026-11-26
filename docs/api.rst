@@ -37,6 +37,7 @@ Frozen Messages
 .. autoclass:: FrozenMessage
 .. autoclass:: FrozenMetaMessage
 .. autoclass:: FrozenUnknownMetaMessage
+.. autoclass:: FrozenSysexEvent
 
 
 Parsing
@@ -175,6 +176,11 @@ Standard MIDI Files
    :undoc-members:
 
 .. autoclass:: MetaMessage
+   :members:
+   :inherited-members:
+   :undoc-members:
+
+.. autoclass:: SysexEvent
    :members:
    :inherited-members:
    :undoc-members:

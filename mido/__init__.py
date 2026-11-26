@@ -30,6 +30,7 @@ MIDI files:
 
     MidiFile(filename, **kwargs) -- open a MIDI file
     MidiTrack()  -- a MIDI track
+    SysexEvent(status, data, time) -- a segmented SysEx file event
     bpm2tempo()  -- convert beats per minute to MIDI file tempo
     tempo2bpm()  -- convert MIDI file tempo to beats per minute
     merge_tracks(tracks)  -- merge tracks into one track
@@ -112,6 +113,7 @@ from .midifiles import (
     MetaMessage,
     MidiFile,
     MidiTrack,
+    SysexEvent,
     UnknownMetaMessage,
     bpm2tempo,
     merge_tracks,
@@ -137,6 +139,7 @@ __all__ = [
     "MidiFile",
     "MidiTrack",
     "Parser",
+    "SysexEvent",
     "UnknownMetaMessage",
     "bpm2tempo",
     "format_as_string",

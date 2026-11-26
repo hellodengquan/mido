@@ -25,7 +25,9 @@ import time
 from numbers import Integral
 
 from ..messages import SPEC_BY_STATUS, Message
+from ..messages.specs import SYSEX_END, SYSEX_START
 from .meta import MetaMessage, build_meta_message, encode_variable_int, meta_charset
+from .sysex import SysexEvent
 from .tracks import MidiTrack, fix_end_of_track, merge_tracks
 from .units import tick2second
 
@@ -133,21 +135,48 @@ def read_message(infile, status_byte, peek_data, delta, clip=False):
     return Message.from_bytes([status_byte] + data_bytes, time=delta)
 
 
-def read_sysex(infile, delta, clip=False):
+def read_sysex(infile, delta, clip=False, status=SYSEX_START):
+    """Read a SysEx event from a track.
+
+    ``status`` is the status byte that introduced the event: ``F0``
+    for a SysEx start packet or ``F7`` for an escape/continuation
+    event.
+
+    A complete ``F0`` packet (one whose payload ends with ``F7``) is
+    returned as ``Message('sysex')``. Anything else is kept as a
+    ``SysexEvent`` with its payload untouched, so that it can be
+    written back byte for byte with its original delta time.
+    """
     length = read_variable_int(infile)
     data = read_bytes(infile, length)
 
-    # Strip start and end bytes.
-    # TODO: is this necessary?
-    if data and data[0] == 0xf0:
-        data = data[1:]
-    if data and data[-1] == 0xf7:
-        data = data[:-1]
+    if status == SYSEX_START and data and data[-1] == SYSEX_END:
+        # Complete message. Strip the framing bytes that
+        # Message('sysex') adds back when encoding. Some files
+        # redundantly include the start byte in the payload.
+        payload = data[:-1]
+        if payload and payload[0] == SYSEX_START:
+            payload = payload[1:]
 
-    if clip:
+        if clip:
+            payload = [byte if byte < 127 else 127 for byte in payload]
+
+        try:
+            return Message('sysex', data=payload, time=delta)
+        except ValueError:
+            # The payload cannot be represented as a sysex message
+            # (for example it contains a status byte). Keep it as a
+            # file event instead of rejecting the file.
+            pass
+
+    # An unterminated SysEx start packet or an F7 escape/continuation.
+    # Keep the payload and its framing exactly as stored. A SysEx start
+    # packet must still hold 7-bit data, so clipping applies to it. An
+    # escape may legitimately carry status bytes and is left alone.
+    if clip and status == SYSEX_START:
         data = [byte if byte < 127 else 127 for byte in data]
 
-    return Message('sysex', data=data, time=delta)
+    return SysexEvent(status=status, data=data, time=delta)
 
 
 def read_variable_int(infile):
@@ -203,17 +232,18 @@ def read_track(infile, debug=False, clip=False):
             peek_data = [status_byte]
             status_byte = last_status
         else:
-            if status_byte != 0xff:
-                # Meta messages don't set running status.
+            if status_byte not in [SYSEX_START, SYSEX_END, 0xff]:
+                # Meta messages and SysEx events don't set running
+                # status. They leave any channel status from before
+                # untouched, so a data byte after them is still read
+                # as the previous channel message.
                 last_status = status_byte
             peek_data = []
 
         if status_byte == 0xff:
             msg = read_meta_message(infile, delta)
-        elif status_byte in [0xf0, 0xf7]:
-            # TODO: I'm not quite clear on the difference between
-            # f0 and f7 events.
-            msg = read_sysex(infile, delta, clip)
+        elif status_byte in [SYSEX_START, SYSEX_END]:
+            msg = read_sysex(infile, delta, clip, status=status_byte)
         else:
             msg = read_message(infile, status_byte, peek_data, delta, clip)
 
@@ -253,12 +283,18 @@ def write_track(outfile, track):
         if msg.is_meta:
             data.extend(msg.bytes())
             running_status_byte = None
+        elif isinstance(msg, SysexEvent):
+            # Write the event with its original status byte and
+            # payload. This preserves unterminated F0 packets, F7
+            # continuations and F7 escapes byte for byte.
+            data.extend(msg.bytes())
+            running_status_byte = None
         elif msg.type == 'sysex':
-            data.append(0xf0)
+            data.append(SYSEX_START)
             # length (+ 1 for end byte (0xf7))
             data.extend(encode_variable_int(len(msg.data) + 1))
             data.extend(msg.data)
-            data.append(0xf7)
+            data.append(SYSEX_END)
             running_status_byte = None
         else:
             msg_bytes = msg.bytes()
@@ -410,7 +446,9 @@ class MidiFile:
         previous message.
 
         By default you will only get normal MIDI messages. Pass
-        meta_messages=True if you also want meta messages.
+        meta_messages=True if you also want meta messages. File events
+        such as ``SysexEvent``, which cannot be sent on a port, are
+        also only yielded in that case.
 
         You will receive copies of the original messages, so you can
         safely modify them without ruining the tracks.
@@ -432,7 +470,7 @@ class MidiFile:
             if duration_to_next_event > 0.0:
                 time.sleep(duration_to_next_event)
 
-            if isinstance(msg, MetaMessage) and not meta_messages:
+            if not isinstance(msg, Message) and not meta_messages:
                 continue
             else:
                 yield msg
