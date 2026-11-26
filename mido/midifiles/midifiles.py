@@ -26,7 +26,12 @@ from numbers import Integral
 
 from ..messages import SPEC_BY_STATUS, Message
 from .meta import MetaMessage, build_meta_message, encode_variable_int, meta_charset
-from .tracks import MidiTrack, fix_end_of_track, merge_tracks
+from .tracks import (
+    MidiTrack,
+    fix_end_of_track,
+    merge_tracks,
+    tracks_cache_token,
+)
 from .units import tick2second
 
 # The default tempo is 120 BPM.
@@ -305,7 +310,11 @@ class MidiFile:
         self.clip = clip
 
         self.tracks = []
+        # Cached merged track plus the arrangement token it was built from.
         self._merged_track = None
+        self._merged_track_token = None
+        # Monotonic counter of observed arrangement revisions.
+        self._version = 0
 
         if type not in range(3):
             raise ValueError(
@@ -320,19 +329,79 @@ class MidiFile:
                 self._load(file)
 
     @property
+    def version(self):
+        """Monotonic counter for the arrangement version.
+
+        It is incremented whenever :attr:`merged_track` has to be rebuilt
+        after an edit.  Repeated requests for an unchanged score keep the
+        same version and reuse the cached merged track.
+        """
+        return self._version
+
+    @version.setter
+    def version(self, value):
+        self._version = value
+
+    #: Alias for :attr:`version`.
+    revision = version
+
+    @property
+    def _revision(self):
+        return self._version
+
+    @_revision.setter
+    def _revision(self, value):
+        self._version = value
+
+    @property
     def merged_track(self):
+        """All messages from all tracks merged into one playback track.
+
+        The result is cached and reused on repeated requests as long as the
+        arrangement is unchanged.  Edits made directly to ``tracks``,
+        :class:`~mido.MidiTrack` objects or their messages are detected
+        automatically, so the next request returns a freshly merged track
+        without the caller having to invalidate anything.
+        """
         # The tracks of type 2 files are not in sync, so they can
         # not be played back like this.
         if self.type == 2:
             raise TypeError("can't merge tracks in type 2 (asynchronous) file")
 
+        token = tracks_cache_token(self.tracks)
         if self._merged_track is None:
-            self._merged_track = merge_tracks(self.tracks, skip_checks=True)
+            self._rebuild_merged_track(token)
+        elif (self._merged_track_token is not None
+              and token != self._merged_track_token):
+            # The arrangement changed since the cache was built.
+            self._rebuild_merged_track(token)
+        # If ``_merged_track_token`` is None while a value is present, the
+        # cached object was installed directly (backwards compatible); use it.
+        return self._merged_track
+
+    def _rebuild_merged_track(self, token=None):
+        if token is None:
+            token = tracks_cache_token(self.tracks)
+        self._merged_track = merge_tracks(self.tracks, skip_checks=True)
+        self._merged_track_token = token
+        self._version += 1
         return self._merged_track
 
     @merged_track.deleter
     def merged_track(self):
         self._merged_track = None
+        self._merged_track_token = None
+
+    @merged_track.setter
+    def merged_track(self, value):
+        # Allows ``midi_file.merged_track = None`` as an alternative to
+        # ``del midi_file.merged_track``.  An explicitly supplied track is
+        # assumed to represent the current arrangement; the next edit will
+        # invalidate it again.
+        self._merged_track = value
+        self._merged_track_token = (
+            None if value is None else tracks_cache_token(self.tracks)
+        )
 
     def add_track(self, name=None):
         """Add a new track to the file.

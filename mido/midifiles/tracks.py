@@ -2,10 +2,55 @@
 #
 # SPDX-License-Identifier: MIT
 
+from ..messages import _changes
 from .meta import MetaMessage
 
 
 class MidiTrack(list):
+    """A list of MIDI messages.
+
+    The track keeps an internal revision counter that is incremented by
+    every in-place edit (including edits made directly to the messages it
+    contains).  This allows derived data, such as
+    :attr:`MidiFile.merged_track`, to be cached until the arrangement
+    actually changes -- callers never need to invalidate the cache
+    themselves.
+    """
+
+    def __init__(self, messages=()):
+        list.__init__(self, messages)
+        self._version = 0
+        for message in self:
+            _changes.connect(message, self)
+
+    @property
+    def version(self):
+        """Monotonic revision number; incremented on every edit."""
+        return getattr(self, '_version', 0)
+
+    @version.setter
+    def version(self, value):
+        self._version = value
+
+    # Alias for the same concept under the "revision" naming.
+    revision = version
+
+    @property
+    def _revision(self):
+        return getattr(self, '_version', 0)
+
+    @_revision.setter
+    def _revision(self, value):
+        self._version = value
+
+    def _mido_bump_revision(self):
+        """Called by the change bus when a contained message is edited."""
+        self._version = getattr(self, '_version', 0) + 1
+
+    # The message notification bus uses the name above; keep a plainly
+    # named alias for internal/manual use.
+    _bump_version = _mido_bump_revision
+
     @property
     def name(self):
         """Name of the track.
@@ -25,7 +70,8 @@ class MidiTrack(list):
 
     @name.setter
     def name(self, name):
-        # Find the first track_name message and modify it.
+        # Find the first track_name message and modify it.  Editing the
+        # message in place notifies us through the change bus.
         for message in self:
             if message.type == 'track_name':
                 message.name = name
@@ -36,6 +82,90 @@ class MidiTrack(list):
 
     def copy(self):
         return self.__class__(self)
+
+    def append(self, message):
+        list.append(self, message)
+        _changes.connect(message, self)
+        self._mido_bump_revision()
+
+    def extend(self, messages):
+        messages = list(messages)
+        list.extend(self, messages)
+        for message in messages:
+            _changes.connect(message, self)
+        self._mido_bump_revision()
+
+    def insert(self, index, message):
+        list.insert(self, index, message)
+        _changes.connect(message, self)
+        self._mido_bump_revision()
+
+    def __iadd__(self, messages):
+        # list's in-place concat slot bypasses an overridden extend(), so
+        # route through our versioned implementation explicitly.
+        self.extend(messages)
+        return self
+
+    def __imul__(self, count):
+        list.__imul__(self, count)
+        # Repeated messages are the same objects and already registered.
+        self._mido_bump_revision()
+        return self
+
+    def __setitem__(self, index_or_slice, value):
+        if isinstance(index_or_slice, slice):
+            new_messages = list(value)
+            old_messages = list.__getitem__(self, index_or_slice)
+            list.__setitem__(self, index_or_slice, new_messages)
+            for message in old_messages:
+                _changes.disconnect(message, self)
+            for message in new_messages:
+                _changes.connect(message, self)
+        else:
+            old_message = list.__getitem__(self, index_or_slice)
+            list.__setitem__(self, index_or_slice, value)
+            _changes.disconnect(old_message, self)
+            _changes.connect(value, self)
+        self._mido_bump_revision()
+
+    def __delitem__(self, index_or_slice):
+        removed = list.__getitem__(self, index_or_slice)
+        list.__delitem__(self, index_or_slice)
+        if isinstance(index_or_slice, slice):
+            for message in removed:
+                _changes.disconnect(message, self)
+        else:
+            _changes.disconnect(removed, self)
+        self._mido_bump_revision()
+
+    def pop(self, index=-1):
+        message = list.pop(self, index)
+        _changes.disconnect(message, self)
+        self._mido_bump_revision()
+        return message
+
+    def remove(self, message):
+        # list.remove() compares by value, so locate the actual object that
+        # will be removed in order to detach it from the change bus.
+        index = list.index(self, message)
+        removed = list.__getitem__(self, index)
+        list.remove(self, message)
+        _changes.disconnect(removed, self)
+        self._mido_bump_revision()
+
+    def clear(self):
+        for message in list(self):
+            _changes.disconnect(message, self)
+        list.clear(self)
+        self._mido_bump_revision()
+
+    def sort(self, *args, **kwargs):
+        list.sort(self, *args, **kwargs)
+        self._mido_bump_revision()
+
+    def reverse(self):
+        list.reverse(self)
+        self._mido_bump_revision()
 
     def __getitem__(self, index_or_slice):
         # Retrieve item from the MidiTrack
@@ -62,6 +192,38 @@ class MidiTrack(list):
         else:
             messages = '[\n  {}]'.format(',\n  '.join(repr(m) for m in self))
         return f'{self.__class__.__name__}({messages})'
+
+
+def tracks_cache_token(tracks):
+    """Return a cheap, comparable token describing the arrangement.
+
+    The token changes whenever any track is added, removed, reordered or
+    replaced, when a :class:`MidiTrack` is edited, or when a message inside
+    a plain list-like track is modified.  It is used to decide whether a
+    cached merged track can be reused.
+
+    For normal :class:`MidiTrack` objects the cost is O(number of tracks),
+    which makes repeatedly viewing a long unchanged score cheap.
+    """
+    parts = []
+    for track in tracks:
+        version = getattr(track, '_version', None)
+        if version is not None:
+            # The id detects replacement/reordering of whole tracks; the
+            # version detects every in-place edit.
+            parts.append((id(track), version))
+        else:
+            # Fallback for plain list-like tracks: track the identity and
+            # per-message revision of every message.  This is O(messages)
+            # but stays correct for tracks that are not MidiTrack.
+            parts.append((
+                id(track),
+                tuple(
+                    (id(message), _changes.message_revision(message))
+                    for message in track
+                ),
+            ))
+    return tuple(parts)
 
 
 def _to_abstime(messages, skip_checks=False):

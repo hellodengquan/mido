@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from numbers import Integral
 
 from ..messages import BaseMessage, check_time
+from ..messages._changes import notify as _notify_change
 
 _charset = 'latin1'
 
@@ -529,7 +530,11 @@ class MetaMessage(BaseMessage):
                 check_time(value)
             else:
                 spec.check(name, value)
+            old_value = self_vars.get(name)
             self_vars[name] = value
+            if value != old_value:
+                # Let any track/cache containing this message know.
+                _notify_change(self)
 
         elif name in self_vars:
             raise AttributeError(f'{name} attribute is read only')
@@ -590,7 +595,10 @@ class UnknownMetaMessage(MetaMessage):
     def __setattr__(self, name, value):
         # This doesn't do any checking.
         # It probably should.
+        old_value = vars(self).get(name)
         vars(self)[name] = value
+        if value != old_value:
+            _notify_change(self)
 
     def bytes(self):
         length = encode_variable_int(len(self.data))

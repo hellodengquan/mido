@@ -4,6 +4,7 @@
 
 import re
 
+from ._changes import notify as _notify_change
 from .checks import check_data, check_msgdict, check_value
 from .decode import decode_message
 from .encode import encode_message
@@ -210,10 +211,14 @@ class Message(BaseMessage):
                                                        name))
         else:
             check_value(name, value)
+            old_value = vars(self).get(name)
             if name == 'data':
-                vars(self)['data'] = SysexData(value)
-            else:
-                vars(self)[name] = value
+                value = SysexData(value)
+            vars(self)[name] = value
+            if value != old_value:
+                # Let any track/cache that contains this message know that
+                # its arrangement may have changed.
+                _notify_change(self)
 
     __setattr__ = _setattr
 
